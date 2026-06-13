@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Add Candidate</title>
+
+    <style>
+        body {
+            font-family: Arial;
+            background: #1e1e2f;
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .box {
+            background: #2c2c3e;
+            padding: 30px;
+            border-radius: 10px;
+            width: 400px;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border: none;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            background: #2ecc71;
+            border: none;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 5px;
+        }
+
+        button:hover {
+            background: #27ae60;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="box">
+
+    <h2>Add New Candidate</h2>
+
+    <form method="POST" enctype="multipart/form-data">
+        {% csrf_token %}
+
+        <input type="text" name="name" placeholder="Name" required>
+        <input type="email" name="email" placeholder="Email" required>
+
+        <select name="role">
+            <option>JAVA DEVELOPER</option>
+            <option>DATA ANALYST</option>
+            <option>BUSINESS ANALYST</option>
+            <option>PROJECT MANAGER</option>
+        </select>
+
+        <select name="employment_type">
+            <option>C2C</option>
+            <option>FTE</option>
+        </select>
+
+        <input type="file" name="resume" required>
+
+        <button type="submit">Save Candidate</button>
+    </form>
+
+</div>
+
+</body>
+</html>
