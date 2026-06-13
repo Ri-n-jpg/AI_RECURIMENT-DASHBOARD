@@ -13,6 +13,16 @@ This project automates the hiring process by:
 - ⚡ Improving recruitment speed and accuracy
 
 ---
+## 📸 Screenshots
+
+### 🏠 Dashboard
+![Dashboard](screenshots/dashboard.png)
+
+### ➕ Add New Candidate
+![Add New](screenshots/addnew.png)
+
+### 🛠️ Admin Panel
+![Admin](screenshots/admin.png)
 
 ## ✨ Features
 
