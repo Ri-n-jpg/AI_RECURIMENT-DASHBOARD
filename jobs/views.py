@@ -1,10 +1,9 @@
 from django.conf import settings
 from django.core.mail import EmailMessage
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, render, redirect
 from pypdf import PdfReader
 import re
-import json
-from django.shortcuts import render,redirect
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
@@ -24,7 +23,7 @@ def clean_text(text):
 
 
 # -----------------------------
-# PDF EXTRACTION
+# EXTRACT PDF TEXT
 # -----------------------------
 def extract_text(file_path):
     reader = PdfReader(file_path)
@@ -39,25 +38,56 @@ def extract_text(file_path):
 
 
 # -----------------------------
-# TARGET ROLES
+# TARGET ROLES (NORMALIZED)
 # -----------------------------
 TARGET_ROLES = [
     "JAVA DEVELOPER",
     "BUSINESS ANALYST",
     "PROJECT MANAGER",
-    "DATA ANALYST"
+    "DATA ANALYST",
+    "BUSINESS DEVELOPER"
 ]
 
-def dashboard(request):
 
-    candidates = Candidate.objects.all().order_by('-score')
+# -----------------------------
+# STATUS FUNCTION (FINAL FIX)
+# -----------------------------
+def get_status(score):
+    if score >= 80:
+        return "SHORTLISTED"
+    elif score >= 50:
+        return "REVIEW"
+    else:
+        return "REJECTED"
+
+@api_view(['GET'])
+def test_ai(request):
+
+    client = Groq(api_key=settings.GROQ_API_KEY)
+
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {"role": "user", "content": "Write a 4-line summary for a Java Developer."}
+        ]
+    )
+
+    return Response({
+        "result": response.choices[0].message.content
+    })
+# -----------------------------
+# DASHBOARD
+# -----------------------------
+def dashboard(request):
+    candidates = Candidate.objects.all().order_by('-score', '-id')
 
     return render(request, "dashboard.html", {
         "candidates": candidates
     })
 
+
 # -----------------------------
-# 1. GET CANDIDATES
+# GET CANDIDATES API
 # -----------------------------
 @api_view(["GET"])
 def get_candidates(request):
@@ -68,6 +98,214 @@ def get_candidates(request):
         "count": candidates.count(),
         "data": serializer.data
     })
+
+
+# -----------------------------
+# SCORE SINGLE CANDIDATE (FIXED)
+# -----------------------------
+@api_view(["GET"])
+def score_candidate(request, candidate_id):
+
+    client = Groq(api_key=settings.GROQ_API_KEY)
+    candidate = get_object_or_404(Candidate, id=candidate_id)
+
+    resume_text = extract_text(candidate.resume.path)
+
+    if not resume_text or len(resume_text) < 30:
+        candidate.score = 50
+        candidate.status = "REVIEW"
+        candidate.save()
+        return Response({"error": "Invalid resume", "score": 50})
+
+    prompt = f"""
+    You are an ATS resume scoring system.
+
+    Analyze resume and return ONLY ONE INTEGER between 0 and 100.
+
+    RULES:
+    - No text
+    - No explanation
+    - No words like "score"
+    - Only number
+
+    Resume:
+    {resume_text}
+    """
+
+    res = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {"role": "system", "content": "Return only a number"},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2
+    )
+
+    raw = res.choices[0].message.content.strip()
+    print("RAW AI OUTPUT:", raw)
+
+    match = re.search(r'\b(100|[1-9]?\d)\b', raw)
+
+    if match:
+        score = int(match.group())
+    else:
+        score = 50
+    score = max(0, min(score, 100))
+
+    candidate.score = score
+    candidate.status = get_status(score)
+    candidate.save()
+
+    return Response({
+        "candidate": candidate.name,
+        "score": score,
+        "status": candidate.status,
+        "raw_output": raw
+    })
+
+
+# -----------------------------
+# ADD CANDIDATE (FIXED FINAL)
+# -----------------------------
+def add_candidate(request):
+
+    if request.method == "POST":
+
+        role = request.POST.get("role", "").upper()
+
+        candidate = Candidate.objects.create(
+            name=request.POST.get("name"),
+            email=request.POST.get("email"),
+            role=role,
+            employment_type=request.POST.get("employment_type"),
+            resume=request.FILES.get("resume"),
+            score=50,          # 🔥 FIX: default safe score
+            status="REVIEW"
+        )
+
+        resume_text = extract_text(candidate.resume.path)
+
+        if not resume_text or len(resume_text) < 30:
+            candidate.score = 50
+            candidate.status = "REVIEW"
+            candidate.save()
+            return redirect("/api/dashboard/")
+
+        client = Groq(api_key=settings.GROQ_API_KEY)
+
+        prompt = f"""
+Return ONLY a number between 0 and 100.
+
+Resume:
+{resume_text}
+"""
+
+        res = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Return only number"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2
+        )
+
+        raw = res.choices[0].message.content.strip()
+        print("RAW AI OUTPUT:", raw)
+
+        numbers = re.findall(r'\d+', raw)
+
+        score = int(numbers[0]) if numbers else 50
+        score = max(0, min(score, 100))
+
+        candidate.score = score
+        candidate.status = get_status(score)
+        candidate.save()
+
+        return redirect("/api/dashboard/")
+
+    return render(request, "add_candidate.html")
+
+
+# -----------------------------
+# PIPELINE (FINAL FIXED)
+# -----------------------------
+@api_view(['GET'])
+def run_pipeline(request):
+
+    client = Groq(api_key=settings.GROQ_API_KEY)
+
+    candidates = Candidate.objects.filter(
+        role__in=TARGET_ROLES,
+        employment_type="C2C"
+    )
+
+    results = []
+
+    for c in candidates:
+
+        try:
+            resume_text = extract_text(c.resume.path)
+
+            if not resume_text or len(resume_text) < 30:
+                c.score = 50
+                c.status = "REVIEW"
+                c.save()
+
+                results.append({
+                    "id": c.id,
+                    "name": c.name,
+                    "score": 50,
+                    "status": "REVIEW",
+                    "error": "Invalid resume"
+                })
+                continue
+
+            prompt = f"""
+Return ONLY a number between 0 and 100.
+
+Resume:
+{resume_text}
+"""
+
+            res = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            raw = res.choices[0].message.content.strip()
+
+            numbers = re.findall(r'\d+', raw)
+
+            score = int(numbers[0]) if numbers else 50
+            score = max(0, min(score, 100))
+
+            c.score = score
+            c.status = get_status(score)
+            c.save()
+
+            results.append({
+                "id": c.id,
+                "name": c.name,
+                "score": score,
+                "status": c.status
+            })
+
+        except Exception as e:
+            results.append({
+                "id": c.id,
+                "name": c.name,
+                "error": str(e)
+            })
+
+    return Response({
+        "message": "Pipeline executed successfully",
+        "results": results
+    })
+
+
+# -----------------------------
+# EMAIL - TEST
+# -----------------------------
 @api_view(['GET'])
 def send_test_email(request):
 
@@ -93,6 +331,11 @@ Please find attached resume.
     email.send()
 
     return Response({"message": "Email sent"})
+
+
+# -----------------------------
+# EMAIL - BULK
+# -----------------------------
 @api_view(['GET'])
 def send_bulk_email(request):
 
@@ -124,34 +367,14 @@ Please find attached resume.
         "message": f"{count} emails sent successfully"
     })
 
-# -----------------------------
-# 2. TEST AI
-# -----------------------------
-@api_view(['GET'])
-def test_ai(request):
-
-    client = Groq(api_key=settings.GROQ_API_KEY)
-
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "user", "content": "Write a 4-line summary for a Java Developer."}
-        ]
-    )
-
-    return Response({
-        "result": response.choices[0].message.content
-    })
-
 
 # -----------------------------
-# 3. ANALYZE RESUME
+# ANALYZE RESUME
 # -----------------------------
 @api_view(['GET'])
 def analyze_resume(request, candidate_id):
 
     client = Groq(api_key=settings.GROQ_API_KEY)
-
     candidate = get_object_or_404(Candidate, id=candidate_id)
 
     resume_text = extract_text(candidate.resume.path)
@@ -180,97 +403,12 @@ Resume:
 
 
 # -----------------------------
-# 4. SCORE SINGLE CANDIDATE (FIXED)
-# -----------------------------
-@api_view(["GET"])
-def score_candidate(request, candidate_id):
-
-    client = Groq(api_key=settings.GROQ_API_KEY)
-
-    # 1. Get candidate
-    candidate = get_object_or_404(Candidate, id=candidate_id)
-
-    # 2. Extract resume text
-    resume_text = extract_text(candidate.resume.path)
-
-    if not resume_text or len(resume_text) < 30:
-        return Response({
-            "error": "Invalid resume text",
-            "score": 0
-        })
-
-    # 3. Strong prompt (IMPORTANT)
-
-    prompt = f"""
-    You are an ATS resume evaluator.
-
-    Score the resume from 0 to 100 based on:
-
-    - Skills match (0–40)
-    - Projects (0–30)
-    - Experience (0–20)
-    - Resume clarity (0–10)
-
-    SCORING GUIDE:
-    - 80–100 = Excellent (strong skills + good projects)
-    - 60–79 = Good (decent match, some experience)
-    - 40–59 = Average (basic skills, limited projects)
-    - 0–39 = Weak (poor match or missing skills)
-
-    IMPORTANT RULES:
-    - DO NOT give same score for all resumes
-    - Analyze deeply and differentiate candidates
-    - Be realistic, not biased low or high
-
-    Return ONLY a number (0–100)
-
-    Resume:
-    {resume_text}
-    """
-    # 4. Call AI
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": "Return only a number 0-100."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.2
-    )
-
-    raw = response.choices[0].message.content.strip()
-
-    print("RAW AI OUTPUT:", raw)  # DEBUG (optional)
-
-    # 5. SAFE SCORE EXTRACTION (FINAL FIX)
-    match = re.search(r'\d+', raw)
-
-    score = int(match.group()) if match else 0
-
-    # 6. Clamp score
-    score = max(0, min(score, 100))
-
-    # 7. Save to DB
-    candidate.score = score
-    candidate.save()
-
-    # 8. Response
-    return Response({
-        "candidate": candidate.name,
-        "score": score,
-        "raw_output": raw
-    })
-# -----------------------------
-# 5. RANK CANDIDATES
+# RANK CANDIDATES
 # -----------------------------
 @api_view(['GET'])
 def rank_candidates(request):
 
     candidates = Candidate.objects.all().order_by('-score', 'id')
-
-    print("=== API ORDER ===")
-
-    for c in candidates:
-        print(c.name, c.score)
 
     data = []
     rank = 1
@@ -288,7 +426,7 @@ def rank_candidates(request):
 
 
 # -----------------------------
-# 6. SHORTLIST
+# SHORTLIST
 # -----------------------------
 @api_view(['GET'])
 def shortlist_candidates(request):
@@ -296,19 +434,12 @@ def shortlist_candidates(request):
     candidates = Candidate.objects.filter(
         role__in=TARGET_ROLES,
         employment_type="C2C"
-    ).order_by('-score','id')
+    ).order_by('-score', 'id')
 
     result = []
 
     for c in candidates:
-
-        if c.score >= 80:
-            c.status = "SHORTLISTED"
-        elif c.score >= 50:
-            c.status = "REVIEW"
-        else:
-            c.status = "REJECTED"
-
+        c.status = get_status(c.score)
         c.save()
 
         result.append({
@@ -319,158 +450,3 @@ def shortlist_candidates(request):
         })
 
     return Response(result)
-
-
-# -----------------------------
-# 7. FULL PIPELINE (FIXED)
-# -----------------------------
-@api_view(['GET'])
-def run_pipeline(request):
-
-    client = Groq(api_key=settings.GROQ_API_KEY)
-
-    candidates = Candidate.objects.filter(
-        role__in=TARGET_ROLES,
-        employment_type="C2C"
-    )
-
-    results = []
-
-    for c in candidates:
-
-        try:
-            resume_text = extract_text(c.resume.path)
-
-            if not resume_text or len(resume_text) < 30:
-                results.append({
-                    "id": c.id,
-                    "name": c.name,
-                    "error": "Invalid resume"
-                })
-                continue
-
-            prompt = f"""
-Return ONLY a number 0-100.
-
-Resume:
-{resume_text}
-"""
-
-            res = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            raw = res.choices[0].message.content
-
-            match = re.search(r'\b(100|[1-9]?\d)\b', raw)
-            score = int(match.group()) if match else 0
-
-            score = max(0, min(score, 100))
-
-            c.score = score
-
-            if score >= 80:
-                c.status = "SHORTLISTED"
-            elif score >= 50:
-                c.status = "REVIEW"
-            else:
-                c.status = "REJECTED"
-
-            c.save()
-
-            results.append({
-                "id": c.id,
-                "name": c.name,
-                "score": score,
-                "status": c.status
-            })
-
-        except Exception as e:
-            results.append({
-                "id": c.id,
-                "name": c.name,
-                "error": str(e)
-            })
-            results = sorted(results, key=lambda x: x.get("score", 0), reverse=True)
-
-    return Response({
-        "message": "Pipeline executed successfully",
-        "results": results
-    })
-
-
-
-def add_candidate(request):
-
-    if request.method == "POST":
-
-        # 1. Save candidate first
-        candidate = Candidate.objects.create(
-            name=request.POST.get("name"),
-            email=request.POST.get("email"),
-            role=request.POST.get("role"),
-            employment_type=request.POST.get("employment_type"),
-            resume=request.FILES.get("resume"),
-            score=0,
-            status="PENDING"
-        )
-
-        # 2. Extract resume text
-        resume_text = extract_text(candidate.resume.path)
-
-        if not resume_text:
-            candidate.score = 0
-            candidate.status = "REJECTED"
-            candidate.save()
-            return redirect("/api/dashboard/")
-
-        # 3. AI scoring (SAME LOGIC AS score_candidate)
-        client = Groq(api_key=settings.GROQ_API_KEY)
-
-        prompt = f"""
-Return ONLY valid JSON.
-
-{{
-  "score": 0-100
-}}
-
-Resume:
-{resume_text}
-"""
-
-        res = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Return only JSON"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2
-        )
-
-        raw = res.choices[0].message.content.strip()
-        print("RAW AI OUTPUT:", raw)
-
-        try:
-            data = json.loads(raw)
-            score = int(data.get("score", 0))
-        except:
-            score = 0
-
-        score = max(0, min(score, 100))
-
-        # 4. Update candidate
-        candidate.score = score
-
-        if score >= 80:
-            candidate.status = "SHORTLISTED"
-        elif score >= 50:
-            candidate.status = "REVIEW"
-        else:
-            candidate.status = "REJECTED"
-
-        candidate.save()
-
-        return redirect("/api/dashboard/")
-
-    return render(request, "add_candidate.html")
