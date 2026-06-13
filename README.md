@@ -37,3 +37,15 @@ This project automates the hiring process by:
 ---
 
 ## 📁 Project Structure
+
+```text
+job_automation/
+│
+├── models.py
+├── views.py
+├── serializers.py
+├── urls.py
+│
+media/              # Uploaded resumes stored here
+manage.py
+requirements.txt
